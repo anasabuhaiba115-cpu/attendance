@@ -185,7 +185,8 @@ const clone = v => JSON.parse(JSON.stringify(v));
 const STATUS = {P:{t:'حاضر',c:'ok',k:'ح'},L:{t:'متأخر',c:'late',k:'ت'},A:{t:'غائب',c:'abs',k:'غ'},X:{t:'بعذر / إجازة',c:'exc',k:'ع'}};
 const SHIFT = {M:'صباحي',E:'مسائي',L:'يوم طويل',C:'مناوبة 18 ساعة',D:'مناوبة 24 ساعة'};
 const SHIFT_ORDER = ['D','L','M','E','C'];
-const DEF = {late:30, limit:3, latesPer:3, countExcused:false, times:{M:'08:00',E:'14:00',L:'08:00',C:'14:00',D:'08:00'}};
+const LEC = {P:{t:'حضر',c:'ok',k:'ح'}, A:{t:'ما حضر',c:'abs',k:'غ'}, X:{t:'بعذر',c:'exc',k:'ع'}};
+const DEF = {late:30, limit:3, latesPer:3, countExcused:false, lecDay:1, times:{M:'08:00',E:'14:00',L:'08:00',C:'14:00',D:'08:00'}};
 const AR_WD = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 const AR_MON = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 const AUTHOR = 'د. أنس محمد أبو هيبة';
@@ -216,9 +217,11 @@ function setSync(state, text){ const s = $('sync'); s.className = 'sync ' + stat
 
 /* ---------- derived schedule ---------- */
 function rebuild(){
-  const sched = {}, students = {};
+  const sched = {}, students = {}, lecRoster = {};
   Object.values(S.weeks).filter(w=>!w.deleted).sort((a,b)=>a.start.localeCompare(b.start)).forEach(w => {
+    const roster = (w.st||[]).map((p,j) => /[MELCDP]/.test(w.rows?.[j]||'') ? sidOf(p.full) : null).filter(Boolean);
     (w.days||[]).forEach((dk, i) => {
+      lecRoster[dk] = roster;
       const list = [];
       (w.st||[]).forEach((p, j) => {
         const sid = sidOf(p.full);
@@ -230,7 +233,7 @@ function rebuild(){
     });
   });
   const order = Object.keys(students).sort((a,b)=>students[a].full.localeCompare(students[b].full,'ar'));
-  D = {sched, students, order, dates:Object.keys(sched).sort()};
+  D = {sched, students, order, lecRoster, dates:Object.keys(sched).sort()};
   if (!ui.date || !sched[ui.date]){
     const t = todayKey();
     ui.date = sched[t] ? t : (D.dates.filter(d=>d<=t).pop() || D.dates[0] || null);
@@ -243,14 +246,18 @@ function rebuild(){
 }
 const monthsList = () => [...new Set(D.dates.map(d=>d.slice(0,7)))];
 const markOf = (dk, sid) => S.att[dk]?.marks?.[sid] || null;
+const lecOf = (dk, sid) => S.att[dk]?.lec?.[sid] || null;
+const isLecDay = dk => { const ld = S.settings.lecDay ?? 1; if (ld < 0) return false; const {y,m,d} = parseKey(dk); return new Date(y,m-1,d).getDay() === Number(ld); };
+const onLec = (dk, sid) => isLecDay(dk) && (D.lecRoster[dk]||[]).includes(sid);
 const startOf = code => S.settings.times?.[code] || DEF.times[code];
 const lateMins = (code, t) => { const a = toMin(t), s = toMin(startOf(code)); if (a==null||s==null) return null; let d = a - s; if (d < -720) d += 1440; return d; };
 
 function statsFor(sid, filter){
-  const c = {sched:0,P:0,L:0,A:0,X:0,none:0,lateMin:0};
+  const c = {sched:0,P:0,L:0,A:0,X:0,none:0,lateMin:0,lec:0,lecP:0,lecA:0,lecX:0,lecNone:0};
   const today = todayKey();
   for (const dk of D.dates){
     if (filter && !filter(dk)) continue;
+    if (onLec(dk, sid)){ const l = lecOf(dk, sid); if (l?.s){ c.lec++; c['lec'+l.s]++; } else if (dk <= today){ c.lec++; c.lecNone++; } }
     const e = D.sched[dk].find(x=>x.sid===sid); if (!e) continue;
     const mk = markOf(dk, sid);
     if (mk?.s){ c.sched++; c[mk.s]++; if (mk.s==='L'){ const lm = lateMins(e.code, mk.t); if (lm>0) c.lateMin += lm; } }
@@ -291,6 +298,16 @@ function setMark(dk, sid, patch){
   persist(true);
   render();
 }
+function setLec(dk, sid, patch){
+  const day = (S.att[dk] = S.att[dk] || {marks:{}});
+  day.lec = day.lec || {};
+  const cur = Object.assign({}, day.lec[sid]||{}, patch);
+  for (const k of Object.keys(cur)) if (cur[k]==='' || cur[k]==null) delete cur[k];
+  cur.u = Date.now();
+  day.lec[sid] = cur;
+  persist(true);
+  render();
+}
 function saveSettings(){ S.settings.u = Date.now(); persist(true); }
 /* Newest wins, per record */
 function mergeInto(src){
@@ -304,6 +321,11 @@ function mergeInto(src){
       const tgt = (S.att[dk] = S.att[dk] || {marks:{}}); tgt.marks = tgt.marks || {};
       const cur = tgt.marks[sid];
       if (!cur || (m.u||0) > (cur.u||0)){ tgt.marks[sid] = m; n++; }
+    }
+    for (const [sid, m] of Object.entries(day.lec||{})){
+      const tgt = (S.att[dk] = S.att[dk] || {marks:{}}); tgt.lec = tgt.lec || {};
+      const cur = tgt.lec[sid];
+      if (!cur || (m.u||0) > (cur.u||0)){ tgt.lec[sid] = m; n++; }
     }
   }
   if (src.settings && (src.settings.u||0) > (S.settings.u||0)){ S.settings = Object.assign(clone(DEF), src.settings); n++; }
@@ -389,7 +411,22 @@ function renderDay(){
   h += `<div class="counts"><span class="chip c-none">مجدول ${list.length}</span>` +
     ['P','L','A','X'].map(s=>`<span class="chip c-${STATUS[s].c}">${STATUS[s].t} ${tally[s]}</span>`).join('') +
     (tally.none ? `<span class="chip c-none">غير مسجّل ${tally.none}</span>` : '') + '</div>';
-  if (list.length) h += `<div class="dayexp"><span>تصدير تسجيل هذا اليوم</span><button class="btn" data-dl="day-pdf">PDF</button><button class="btn" data-dl="day-html">HTML</button></div><div class="msg" id="dlmsg"></div>`;
+  if (list.length || isLecDay(dk)) h += `<div class="dayexp"><span>تصدير تسجيل هذا اليوم</span><button class="btn" data-dl="day-pdf">PDF</button><button class="btn" data-dl="day-html">HTML</button></div><div class="msg" id="dlmsg"></div>`;
+  if (isLecDay(dk) && (D.lecRoster[dk]||[]).length){
+    const roster = [...D.lecRoster[dk]].sort((a,b)=>D.students[a].short.localeCompare(D.students[b].short,'ar'));
+    const lt = {P:0,A:0,X:0,none:0}; roster.forEach(sid => lt[lecOf(dk,sid)?.s||'none']++);
+    h += `<section class="grp lec"><div class="grp-h"><h2>محاضرة اليوم التعليمي<small>8 ص – 2 ظ · ${roster.length} طالب</small></h2>
+      ${lt.none ? `<button class="btn" data-lecall>سجّل الباقي حضر (${lt.none})</button>` : ''}</div>
+      <div class="counts">${['P','A','X'].map(s=>`<span class="chip c-${LEC[s].c}">${LEC[s].t} ${lt[s]}</span>`).join('')}${lt.none?`<span class="chip c-none">غير مسجّل ${lt.none}</span>`:''}</div><div class="rows">`;
+    for (const sid of roster){
+      const l = lecOf(dk, sid) || {}, p = D.students[sid];
+      h += `<div class="row lrow" data-sid="${sid}">
+        <div class="nm">${esc(p.short)}<small>${esc(p.full)}</small></div>
+        <div class="seg" role="group" aria-label="حضور المحاضرة ${esc(p.short)}">${['P','A','X'].map(s=>`<button class="s-${s}" data-l="${s}" aria-pressed="${l.s===s}">${LEC[s].t}</button>`).join('')}</div>
+        <div class="extra"><span class="note"><input type="text" id="ln-${dk}-${sid}" data-lf="n" placeholder="ملاحظة…" value="${esc(l.n||'')}" aria-label="ملاحظة المحاضرة ${esc(p.short)}"></span></div></div>`;
+    }
+    h += '</div></section>';
+  }
   if (!list.length) h += '<div class="empty"><b>ما في حدا مجدول بهذا اليوم</b></div>';
   for (const code of SHIFT_ORDER){
     const g = list.filter(e=>e.code===code).sort((a,b)=>D.students[a.sid].short.localeCompare(D.students[b.sid].short,'ar'));
@@ -418,16 +455,19 @@ function renderStudents(){
   const st = S.settings;
   let h = alertsHTML();
   h += `<p class="sub" style="margin:0 0 10px">رصيد الغياب = الغياب بدون عذر${st.latesPer>0?` + كل ${st.latesPer} تأخيرات بغياب`:''}${st.countExcused?' + الغياب بعذر':''}. الحد ${st.limit}. اضغط على اسم لعرض سجله.</p>`;
-  h += `<div class="scroll"><table><thead><tr><th>الطالب</th><th class="n">دوامات</th><th class="n">حاضر</th><th class="n">متأخر</th><th class="n">غائب</th><th class="n">بعذر</th><th class="n">غير مسجّل</th><th class="n">الالتزام</th><th class="n">رصيد الغياب</th></tr></thead><tbody>`;
+  h += `<div class="scroll"><table><thead><tr><th>الطالب</th><th class="n">دوامات</th><th class="n">حاضر</th><th class="n">متأخر</th><th class="n">غائب</th><th class="n">بعذر</th><th class="n">غير مسجّل</th><th class="n">الالتزام</th><th class="n">رصيد الغياب</th><th class="n">المحاضرات</th></tr></thead><tbody>`;
   for (const sid of D.order){
     const c = statsFor(sid), p = D.students[sid];
-    h += `<tr class="click" data-open="${sid}"><td><b>${esc(p.short)}</b></td><td class="n">${c.sched}</td><td class="n">${c.P}</td><td class="n">${c.L}${c.lateMin?` <small class="k-none">(${c.lateMin} د)</small>`:''}</td><td class="n">${c.A}</td><td class="n">${c.X}</td><td class="n">${c.none||'–'}</td><td class="n">${c.rate==null?'–':c.rate+'%'}</td><td class="n"><span class="pill p-${c.level}">${c.bal}</span></td></tr>`;
+    h += `<tr class="click" data-open="${sid}"><td><b>${esc(p.short)}</b></td><td class="n">${c.sched}</td><td class="n">${c.P}</td><td class="n">${c.L}${c.lateMin?` <small class="k-none">(${c.lateMin} د)</small>`:''}</td><td class="n">${c.A}</td><td class="n">${c.X}</td><td class="n">${c.none||'–'}</td><td class="n">${c.rate==null?'–':c.rate+'%'}</td><td class="n"><span class="pill p-${c.level}">${c.bal}</span></td><td class="n">${c.lec ? `${c.lecP}/${c.lec}${c.lecA?` <small class="k-A" style="background:none">غاب ${c.lecA}</small>`:''}` : '–'}</td></tr>`;
     if (ui.open === sid){
-      const recs = D.dates.filter(dk => D.sched[dk].some(e=>e.sid===sid) && (markOf(dk,sid) || dk<=todayKey()));
-      h += `<tr class="detail"><td colspan="9"><div class="recs">${recs.length ? recs.map(dk => {
-        const e = D.sched[dk].find(x=>x.sid===sid), mk = markOf(dk,sid) || {};
+      const recs = D.dates.filter(dk => (D.sched[dk].some(e=>e.sid===sid) || onLec(dk,sid)) && (markOf(dk,sid) || lecOf(dk,sid) || dk<=todayKey()));
+      h += `<tr class="detail"><td colspan="10"><div class="recs">${recs.length ? recs.map(dk => {
+        const lx = onLec(dk,sid) ? (lecOf(dk,sid)||{}) : null;
+        const lh = lx ? `<div class="rec"><span class="d">${longDate(dk)}</span><span>محاضرة</span>${lx.s?`<span class="chip c-${LEC[lx.s].c}">${LEC[lx.s].t}</span>`:'<span class="chip c-none">غير مسجّل</span>'}${lx.n?`<span class="nt">${esc(lx.n)}</span>`:''}</div>` : '';
+        const e = D.sched[dk].find(x=>x.sid===sid); if (!e) return lh;
+        const mk = markOf(dk,sid) || {};
         const lm = mk.t ? lateMins(e.code, mk.t) : null;
-        return `<div class="rec"><span class="d">${longDate(dk)}</span><span>${SHIFT[e.code]}</span>${mk.s?`<span class="chip c-${STATUS[mk.s].c}">${STATUS[mk.s].t}${mk.s==='L'&&lm>0?` ${lm} د`:''}</span>`:'<span class="chip c-none">غير مسجّل</span>'}${mk.t?`<span>وصل ${fmtTime(mk.t)}</span>`:''}${mk.n?`<span class="nt">${esc(mk.n)}</span>`:''}</div>`;
+        return `<div class="rec"><span class="d">${longDate(dk)}</span><span>${SHIFT[e.code]}</span>${mk.s?`<span class="chip c-${STATUS[mk.s].c}">${STATUS[mk.s].t}${mk.s==='L'&&lm>0?` ${lm} د`:''}</span>`:'<span class="chip c-none">غير مسجّل</span>'}${mk.t?`<span>وصل ${fmtTime(mk.t)}</span>`:''}${mk.n?`<span class="nt">${esc(mk.n)}</span>`:''}</div>` + lh;
       }).join('') : '<span class="k-none">ما في دوامات لحد اليوم.</span>'}</div></td></tr>`;
     }
   }
@@ -476,6 +516,9 @@ function renderSettings(){
     <label class="field"><span>حد التنبيه (رصيد الغياب)</span><input type="number" min="1" max="60" id="s-limit" value="${st.limit}"></label>
     <label class="field"><span>كل كم تأخير بيساوي غياب (0 = لا)</span><input type="number" min="0" max="20" id="s-latesPer" value="${st.latesPer}"></label>
     <label class="field chk"><input type="checkbox" id="s-countExcused" ${st.countExcused?'checked':''}><span>احسب الغياب بعذر ضمن الرصيد</span></label>
+  </div></div>`;
+  h += `<div class="card"><h2>المحاضرة</h2><p class="h">بيوم المحاضرة بيطلع بصفحة التسجيل قسم لحضور المحاضرة، لكل طلاب الأسبوع. غياب المحاضرة بينحسب لحاله، ومش داخل برصيد غياب الدوام.</p><div class="fields">
+    <label class="field"><span>يوم المحاضرة</span><select id="s-lecDay">${[[-1,'ما في محاضرة'],[6,'السبت'],[0,'الأحد'],[1,'الاثنين'],[2,'الثلاثاء'],[3,'الأربعاء'],[4,'الخميس'],[5,'الجمعة']].map(([v,t])=>`<option value="${v}"${Number(st.lecDay??1)===v?' selected':''}>${t}</option>`).join('')}</select></label>
   </div></div>`;
   h += `<div class="card"><h2>بداية كل دوام</h2><p class="h">وقت الوصول بيتقارن مع هالأوقات لحساب التأخير. خروج المناوبة ما بينحسب دوام.</p><div class="fields">
     ${['M','E','L','C','D'].map(c=>`<label class="field"><span>${SHIFT[c]}</span><input type="time" id="s-time-${c}" data-time="${c}" value="${esc(startOf(c))}"></label>`).join('')}
@@ -548,23 +591,28 @@ const REPORT_CSS = `.rpt{font-family:'IBM Plex Sans Arabic',Tahoma,Arial,sans-se
 function reportBody(ym){
   const {dates, sids} = monthData(ym), inMonth = inRange(ym);
   const st = S.settings, today = todayKey();
-  const sum = sids.map(sid => { const c = statsFor(sid, inMonth); return `<tr><td>${esc(D.students[sid].full)}</td><td>${c.sched}</td><td>${c.P}</td><td>${c.L}</td><td>${c.A}</td><td>${c.X}</td><td>${c.rate==null?'–':c.rate+'%'}</td><td class="${c.level}">${c.bal}</td></tr>`; }).join('');
+  const sum = sids.map(sid => { const c = statsFor(sid, inMonth); return `<tr><td>${esc(D.students[sid].full)}</td><td>${c.sched}</td><td>${c.P}</td><td>${c.L}</td><td>${c.A}</td><td>${c.X}</td><td>${c.rate==null?'–':c.rate+'%'}</td><td class="${c.level}">${c.bal}</td><td>${c.lec?c.lecP+'/'+c.lec:'–'}</td><td class="${c.lecA?'k-A':''}">${c.lecA||''}</td></tr>`; }).join('');
   const months = [...new Set(dates.map(d=>d.slice(0,7)))];
   const grids = months.map(mo => { const ds = dates.filter(d=>d.startsWith(mo)), ss = sids.filter(sid => ds.some(dk => D.sched[dk].some(e=>e.sid===sid)));
     return `${months.length>1?`<p class="m"><b>${monthLabel(mo)}</b></p>`:''}<table class="grid"><thead><tr><th>الاسم</th>${ds.map(dk=>`<th>${shortDate(dk)}</th>`).join('')}</tr></thead><tbody>${ss.map(sid => `<tr><td>${esc(D.students[sid].short)}</td>${ds.map(dk=>{ const x = cellOf(dk,sid); return `<td class="${x.c}">${x.k}</td>`; }).join('')}</tr>`).join('')}</tbody></table>`; }).join('');
   const notes = [];
+  for (const dk of dates) for (const sid of sids){ const lx = onLec(dk,sid) ? lecOf(dk,sid) : null; if (lx && (lx.n || lx.s==='A' || lx.s==='X')) notes.push(`<tr><td>${longDate(dk)}</td><td>${esc(D.students[sid].full)}</td><td>محاضرة</td><td>${lx.s?LEC[lx.s].t:''}</td><td>${esc(lx.n||'')}</td></tr>`); }
   for (const dk of dates) for (const sid of sids){ const mk = markOf(dk,sid); if (mk && (mk.n || mk.s==='L' || mk.s==='A' || mk.s==='X')){ const e = D.sched[dk].find(x=>x.sid===sid); if(!e) continue; const lm = mk.t?lateMins(e.code,mk.t):null; notes.push(`<tr><td>${longDate(dk)}</td><td>${esc(D.students[sid].full)}</td><td>${SHIFT[e.code]}</td><td>${mk.s?STATUS[mk.s].t:''}${mk.s==='L'&&lm>0?` (${lm} د)`:''}</td><td>${esc(mk.n||'')}</td></tr>`); } }
   return `<h1>تقرير حضور وغياب أطباء الامتياز – قسم الطوارئ، مستشفى الشفاء</h1>
 <p class="m">${monthLabel(ym)} · من ${longDate(dates[0])} إلى ${longDate(dates[dates.length-1])} · محسوب لغاية ${longDate(dates.filter(d=>d<=today).pop()||dates[0])} · التأخير بعد ${st.late} دقيقة · حد الغياب ${st.limit}${st.latesPer>0?` · كل ${st.latesPer} تأخيرات = غياب`:''}</p>
-<h2>الملخص</h2><table><thead><tr><th>الاسم</th><th>دوامات</th><th>حاضر</th><th>متأخر</th><th>غائب</th><th>بعذر</th><th>الالتزام</th><th>رصيد الغياب</th></tr></thead><tbody>${sum}</tbody></table>
+<h2>الملخص</h2><table><thead><tr><th>الاسم</th><th>دوامات</th><th>حاضر</th><th>متأخر</th><th>غائب</th><th>بعذر</th><th>الالتزام</th><th>رصيد الغياب</th><th>محاضرات حضر</th><th>محاضرات غاب</th></tr></thead><tbody>${sum}</tbody></table>
 <h2>السجل اليومي</h2><p class="m">ح حاضر · ت متأخر · غ غائب · ع بعذر/إجازة · ؟ لم يُسجّل</p>${grids}
 ${notes.length?`<h2>التأخير والغياب والملاحظات</h2><table><thead><tr><th>التاريخ</th><th>الاسم</th><th>الدوام</th><th>الحالة</th><th>ملاحظة</th></tr></thead><tbody>${notes.join('')}</tbody></table>`:''}
-<div class="sig"><span>إعداد: ${AUTHOR}</span><span>التوقيع: ....................</span></div>`;
+<div class="sig"><span></span><span>التوقيع: ....................</span></div>`;
 }
 function dayBody(dk){
   const list = D.sched[dk] || [], t = {P:0,L:0,A:0,X:0,none:0};
   list.forEach(e => { t[markOf(dk,e.sid)?.s || 'none']++; });
-  let rows = '';
+  let rows = '', lecRows = '';
+  if (isLecDay(dk)) for (const sid of [...(D.lecRoster[dk]||[])].sort((a,b)=>D.students[a].full.localeCompare(D.students[b].full,'ar'))){
+    const l = lecOf(dk, sid) || {};
+    lecRows += `<tr><td>${esc(D.students[sid].full)}</td><td class="${l.s?'k-'+l.s:'k-none'}">${l.s?LEC[l.s].t:'لم يُسجّل'}</td><td style="text-align:right">${esc(l.n||'')}</td></tr>`;
+  }
   for (const code of SHIFT_ORDER){
     const g = list.filter(e=>e.code===code).sort((a,b)=>D.students[a.sid].full.localeCompare(D.students[b.sid].full,'ar'));
     if (!g.length) continue;
@@ -576,8 +624,9 @@ function dayBody(dk){
   }
   return `<h1>تسجيل حضور أطباء الامتياز – قسم الطوارئ، مستشفى الشفاء</h1>
 <h2>${longDate(dk)}/${parseKey(dk).y}</h2><p class="m">مجدول ${list.length} · حاضر ${t.P} · متأخر ${t.L} · غائب ${t.A} · بعذر ${t.X}${t.none?` · لم يُسجّل ${t.none}`:''} · التأخير بعد ${S.settings.late} دقيقة</p>
+${lecRows ? `<h2>محاضرة اليوم التعليمي</h2><table><thead><tr><th>الاسم</th><th>الحضور</th><th>ملاحظة</th></tr></thead><tbody>${lecRows}</tbody></table><h2>الدوام</h2>` : ''}
 <table><thead><tr><th>الاسم</th><th>الحالة</th><th>وقت الوصول</th><th>التأخير (دقيقة)</th><th>ملاحظة</th></tr></thead><tbody>${rows}</tbody></table>
-<div class="sig"><span>إعداد: ${AUTHOR}</span><span>التوقيع: ....................</span></div>`;
+<div class="sig"><span></span><span>التوقيع: ....................</span></div>`;
 }
 function reportHTML(ym){ return docHTML(`تقرير حضور الامتياز – ${monthLabel(ym)}`, reportBody(ym), 'landscape'); }
 function docHTML(title, body, orient){
@@ -616,9 +665,9 @@ async function reportPDF(body, orient){
 function reportCSV(ym){
   const {dates, sids} = monthData(ym), inMonth = inRange(ym);
   const q = v => `"${String(v??'').replace(/"/g,'""')}"`;
-  const lines = [['الاسم','دوامات','حاضر','متأخر','غائب','بعذر','الالتزام %','رصيد الغياب', ...dates.map(shortDate)].map(q).join(',')];
+  const lines = [['الاسم','دوامات','حاضر','متأخر','غائب','بعذر','الالتزام %','رصيد الغياب','محاضرات حضر','محاضرات غاب', ...dates.map(shortDate)].map(q).join(',')];
   for (const sid of sids){ const c = statsFor(sid, inMonth);
-    lines.push([D.students[sid].full, c.sched, c.P, c.L, c.A, c.X, c.rate??'', c.bal, ...dates.map(dk=>cellOf(dk,sid).k)].map(q).join(',')); }
+    lines.push([D.students[sid].full, c.sched, c.P, c.L, c.A, c.X, c.rate??'', c.bal, c.lecP, c.lecA, ...dates.map(dk=>cellOf(dk,sid).k)].map(q).join(',')); }
   return '﻿' + lines.join('\r\n');
 }
 async function download(kind){
@@ -653,6 +702,9 @@ $('tabs').addEventListener('click', e => { const b = e.target.closest('button[da
 $('main').addEventListener('click', async e => {
   const t = e.target.closest('button, tr[data-open]'); if (!t) return;
   const row = t.closest('.row');
+  if (t.dataset.l && row){ const sid = row.dataset.sid, cur = lecOf(ui.date, sid)?.s; setLec(ui.date, sid, {s: cur===t.dataset.l ? '' : t.dataset.l}); return; }
+  if ('lecall' in t.dataset){ const dk = ui.date, day = (S.att[dk] = S.att[dk] || {marks:{}}); day.lec = day.lec || {}; const now = Date.now();
+    (D.lecRoster[dk]||[]).filter(sid => !day.lec[sid]?.s).forEach(sid => day.lec[sid] = Object.assign({}, day.lec[sid], {s:'P', u:now})); persist(true); render(true); return; }
   if (t.dataset.s && row){ const sid = row.dataset.sid, cur = markOf(ui.date, sid)?.s; setMark(ui.date, sid, {s: cur===t.dataset.s ? '' : t.dataset.s}); return; }
   if (t.dataset.nav){ const i = D.dates.indexOf(ui.date) + Number(t.dataset.nav); if (D.dates[i]) { ui.date = D.dates[i]; render(true); } return; }
   if ('today' in t.dataset){ ui.date = todayKey(); render(true); return; }
@@ -713,6 +765,7 @@ $('main').addEventListener('change', e => {
   if (el.id === 'msel'){ ui.month = el.value; render(true); return; }
   if (el.id === 'impf'){ importFile(el.files?.[0]); el.value = ''; return; }
   const row = el.closest('.row');
+  if (row && el.dataset.lf){ setLec(ui.date, row.dataset.sid, {n: el.value.trim()}); return; }
   if (row && el.dataset.f){
     const sid = row.dataset.sid, dk = ui.date;
     if (el.dataset.f === 'n'){ setMark(dk, sid, {n: el.value.trim()}); return; }
@@ -726,6 +779,7 @@ $('main').addEventListener('change', e => {
     const st = S.settings;
     if (el.dataset.time){ st.times = Object.assign({}, st.times, {[el.dataset.time]: el.value || DEF.times[el.dataset.time]}); }
     else if (el.id === 's-countExcused') st.countExcused = el.checked;
+    else if (el.id === 's-lecDay') st.lecDay = Number(el.value);
     else { const k = el.id.slice(2), v = Math.max(0, Math.round(Number(el.value))); if (!Number.isFinite(v)) return; st[k] = k==='limit' ? Math.max(1,v) : v; }
     saveSettings(); rebuild(); render(); toast('انحفظت الإعدادات');
   }
